@@ -1,0 +1,137 @@
+#!/usr/bin/env perl
+
+use strict;
+use warnings;
+use Getopt::Long;
+use YAML;
+use Digest::MD5;
+use Convert::Base32;
+use IPC::Run qw(run timeout);
+use File::Path;
+use XXX;
+
+my $input = $ENV{INPUT};
+my $cogbase = $ENV{COGBASE};
+my $times = {};
+my $x = 0;
+
+{
+    GetOptions(
+        'input=s' => \$input,
+        'cogbase=s' => \$cogbase,
+    );
+
+    die "No cogbase location specified" unless $cogbase;
+    $ENV{GIT_DIR} = "$cogbase/history";
+    $ENV{GIT_WORK_TREE} = "$cogbase";
+    $ENV{GIT_AUTHOR_NAME} = $ENV{GIT_COMMITTER_NAME} = 'root';
+    create_new_cogbase($cogbase);
+
+    my $data = YAML::Load(do {open my $fh, $input or die; local $/; <$fh>});
+    for my $page_id (sort keys %$data) {
+        my $page = $data->{$page_id};
+        $page->{page_id} = $page_id;
+        my $revs = delete($page->{'04_revisions'}) or die;
+        for my $datetime (sort keys %$revs) {
+            my $rev = $revs->{$datetime};
+            $rev->{datetime} = $datetime;
+            store_page_revision($page, $rev);
+        }
+        # last;
+        # last if $x++ > 20;
+    }
+    # XXX $data;
+}
+
+sub store_page_revision {
+    my ($page, $rev) = @_;
+    my $rnum = $rev->{'01_number'};
+    my $time = $rev->{'02_time'};
+    my $page_id = $page->{page_id};
+
+    # Make a new cog object and indexes
+    $time += 0.1 while $times->{$time}++;
+    if ($rnum == 1) {
+        my $long_id = uc(encode_base32(Digest::MD5::md5($time)));
+        my $dir = "$cogbase/node";
+        my $i = 0;
+        while (1) {
+            mkdir($dir .= '/' . substr($long_id, $i, 1));
+            last if $i++ >= 1 and not -e "$dir/=";
+        }
+        mkdir $dir .= '/=';
+        symlink($long_id, "$dir/&");
+        my $short_id = substr($long_id, 0, $i);
+        symlink($short_id, "$cogbase/index/page_id/$page_id");
+
+        $page->{_cog_id} = $short_id;
+        $page->{_time} = $time;
+
+        symlink($page_id, "$dir/id");
+        symlink($page->{'01_title'}, "$dir/title");
+        symlink($page->{'03_type'}, "$dir/type");
+    }
+
+    # Store the current revision
+    my $id = readlink("$cogbase/index/page_id/$page_id");
+    my $rev_num = $rev->{'01_number'};
+    my $email = $rev->{'03_by'};
+    my $dir = "$cogbase/node/" . join('/', split(//, $id)) . '/=';
+    unlink map "$dir/$_", ('!', '#', '@', '%');
+    symlink('socialtext_wikipage', "$dir/!");
+    symlink($rev_num, "$dir/#");
+    symlink($time, "$dir/@");
+    symlink($email, "$dir/%");
+    {
+        open OUT, "> $dir/content" or die $!;
+        print OUT $rev->{'05_content'};
+        close OUT;
+    }
+    insert_tags($dir, $rev->{'04_tags'});
+
+    {
+        $ENV{GIT_AUTHOR_EMAIL} = $ENV{GIT_COMMITTER_EMAIL} = $email;
+        $ENV{GIT_AUTHOR_DATE} = $ENV{GIT_COMMITTER_DATE} = $time;
+        run_git([add => qw(node index)]);
+        run_git([commit => '-a', '-m' => "${id}0${rev_num} \@$time"]);
+    }
+
+    # index tags
+    symlink("${id}0$rev_num", "$cogbase/index/time/$time");
+}
+
+sub insert_tags {
+    my ($dir, $tags) = @_;
+    rmtree("$dir/tags") if -e "$dir/tags";
+    if (@$tags) {
+        mkdir "$dir/tags" unless -e "$dir/tags";
+        for (my $i = 0; $i < @$tags; $i++) {
+            symlink($tags->[$i], "$dir/tags/$i");
+        }
+    }
+}
+
+sub create_new_cogbase {
+    my $dir = shift;
+    rmtree($dir) if -e $dir;
+
+    mkpath "$dir/node" unless -e "$dir/node";
+    mkpath "$dir/index/time" unless -e "$dir/index/time";
+    mkpath "$dir/index/page_id" unless -e "$dir/index/page_id";
+
+    run_git(['init']);
+    rmtree "$cogbase/history/hooks" or die $@;
+}
+
+sub run_git {
+    my ($args, $in, $out, $err) = @_;
+    run(['git', @$args], \$in, \$out, \$err, timeout(10))
+        or die "'git @$args' failed: $?";
+}
+
+sub make_node_dir {
+}
+
+sub datetime_epoch_to_print {
+    # 1264734344 => 2010-01-29 03:05:44
+}
