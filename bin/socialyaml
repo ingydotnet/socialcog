@@ -1,0 +1,94 @@
+#!/usr/bin/perl
+use warnings;
+use strict;
+use Getopt::Long;
+use LWP::UserAgent;
+use YAML;
+use JSON::XS;
+use DateTime;
+use IO::All;
+use Encode;
+use XXX;
+
+my $WORKSPACE = $ENV{WORKSPACE};
+my $USERNAME = $ENV{USERNAME};
+my $PASSWORD = $ENV{PASSWORD};
+my $INPUT = $ENV{INPUT};
+my $HOST     = 'www.socialtext.net';
+my $PORT     = 443;
+my $PROTO    = 'https';
+my %wiki;
+
+GetOptions(
+    'workspace=s' => \$WORKSPACE,
+    'username=s' => \$USERNAME,
+    'password=s' => \$PASSWORD,
+    'input=s' => \$INPUT,
+);
+
+die usage() unless $WORKSPACE and $USERNAME and $PASSWORD;
+
+my $base_url = "$PROTO\://$HOST\:$PORT/data/workspaces/$WORKSPACE";
+
+my $ua = LWP::UserAgent->new;
+$ua->credentials("$HOST\:$PORT", 'Socialtext', $USERNAME, $PASSWORD);
+
+my $db = $INPUT ? YAML::Load(io($INPUT)->all) : {};
+
+my $resp = $ua->get("$base_url/pages/?count=1000", 'Accept' => 'application/json');
+my $json = $resp->content;
+my $pages = decode_json $json;
+
+warn "Total Pages: " . scalar(@$pages) . "\n\n\n";
+
+my $page_num = 0;
+for my $page (@$pages) {
+    my $page_id = $page->{page_id};
+    my $new_count = $page->{revision_count};
+    $db->{$page_id} ||= {
+        '01_title' => $page->{name},
+        '03_type' => $page->{type},
+        '04_revisions' => {},
+    };
+    $page_num++;
+    my $old_count = scalar(keys %{$db->{$page_id}{'04_revisions'}});
+    next if $new_count == $old_count;
+    warn $page_num . ") Page: $page->{name} ($old_count - $new_count)\n";
+    $db->{$page_id}{'02_count'} = $new_count;
+
+    my $resp = $ua->get("$base_url/pages/$page_id/revisions/", 'Accept' => 'application/json');
+    my $json = $resp->content;
+    my $revisions = decode_json $json;
+    die "Bad count $new_count for $page_id " . scalar(@$revisions)
+        unless $new_count == @$revisions;
+    splice @$revisions, 0, $old_count;
+    my $count = $old_count;
+    while (my $revision = shift @$revisions) {
+        last if ++$count > $new_count;
+        my $resp = $ua->get("$base_url/pages/$page_id/revisions/$revision->{revision_id}/", 'Accept' => 'text/x.socialtext-wiki');
+        my $id = $revision->{revision_id};
+        $id =~
+            s{(\d\d\d\d)(\d\d)(\d\d)(\d\d)(\d\d)(\d\d)$}
+            {$1-$2-$3 $4:$5:$6} or die;
+        $db->{$page_id}{'04_revisions'}{$id} = {
+            '01_number' => $count,
+            '02_time' => DateTime->new(
+                year => $1, month => $2, day => $3,
+                hour => $4, minute => $5, second => $6,
+            )->epoch,
+            '03_by' => $revision->{last_editor},
+            '04_tags' => $revision->{tags},
+            '05_content' => decode("utf8", $resp->content),
+        };
+        warn "  $count) $revision->{revision_id}\n";
+    }
+}
+
+print YAML::Dump($db);
+
+sub usage {
+    <<'...'
+Usage: socialtext-to-yaml --workspace=foo --username=bar@example.com \
+           --password=baz --input=previous-data.yaml > new-data.yaml
+...
+}
