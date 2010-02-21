@@ -1,0 +1,23 @@
+#!/usr/bin/env perl
+
+use strict;
+use warnings;
+use lib 'lib';
+use SocialCog;
+use XXX;
+
+my $ROOT = $ENV{COGBASE_ROOT}
+    or die "COGBASE_ROOT environment variable is required";
+my $WORKSPACE = $ENV{SOCIALTEXT_WORKSPACE}
+    or die "SOCIALTEXT_WORKSPACE environment variable is required";
+my $USERNAME = $ENV{SOCIALTEXT_USERNAME}
+    or die "SOCIALTEXT_USERNAME environment variable is required";
+my $PASSWORD = $ENV{SOCIALTEXT_PASSWORD}
+    or die "SOCIALTEXT_PASSWORD environment variable is required";
+
+if (not -e $ROOT) {
+    CogBase->create_store(root => $ROOT);
+}
+
+{
+
